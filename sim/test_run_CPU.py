@@ -146,8 +146,8 @@ def write_logspaced_multiple(sim, files, base_steps):
 
 def main():
     
-    print("GPU: \n")
-    print(hoomd.device.GPU.get_available_devices())
+    print("CPU Runs. \n")
+    # print(hoomd.device.GPU.get_available_devices())
     ap = argparse.ArgumentParser(description="Star vitrimer (HOOMD v5) runner.")
     ap.add_argument("--kT", type=float, required=True, help="Temperature (kT).")
     ap.add_argument("--rho", type=float, required=True, help="Number density (segments per volume).")
@@ -175,7 +175,7 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
 
     # ------------------------ INIT DEVICE ------------------------
-    device = hoomd.device.auto_select()
+    device = hoomd.device.CPU()
     sim = hoomd.Simulation(device=device, seed=args.seed)
     ini_box_length = 300
     box_vol = total_segments / args.rho
@@ -279,15 +279,16 @@ def main():
         # ------------------------ NVT THERMOSTAT ------------------------
     print("box resize with soft start \n")
     soft_T = 0.2
-    langevin = hoomd.md.methods.Langevin(
+    mttk = hoomd.md.methods.thermostats.MTTK(
         kT=soft_T,
-        filter=hoomd.filter.All()
+        tau=args.mttk_tau,
     )
 
-    
-    
-    
-    sim.operations.integrator.methods.append(langevin)
+    nvt = hoomd.md.methods.ConstantVolume(
+        filter=hoomd.filter.All(),
+        thermostat=mttk
+    )
+    sim.operations.integrator.methods.append(nvt)
     sim.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=soft_T)
     
     box_resize = hoomd.update.BoxResize(
@@ -303,18 +304,7 @@ def main():
     #sim.run(100)
     print(f"Now box: {sim.state.box} \n")
     sim.operations.updaters.remove(box_resize)
-    
-    mttk_production = hoomd.md.methods.thermostats.MTTK(
-        kT=args.kT,
-        tau=args.mttk_tau,
-    )
-
-    nvt_production = hoomd.md.methods.ConstantVolume(
-        filter=hoomd.filter.All(),
-        thermostat=mttk_production
-    )
-    sim.operations.integrator.methods.remove(langevin)
-    sim.operations.integrator.methods.append(nvt_production)
+    mttk.kT = args.kT
     sim.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=args.kT)
    
     sim.operations.integrator.forces.remove(gauss)
