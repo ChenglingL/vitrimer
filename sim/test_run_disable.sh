@@ -38,7 +38,7 @@ for kT in "${KT_LIST[@]}"; do
     run_dir="${OUT}/rho${rho}"
     mkdir -p "$run_dir"
 
-    $PY /home/chengling/Research/Project/vitrimer/sim/test.py \
+    $PY /home/chengling/Research/Project/vitrimer/sim/test_disable.py \
       --kT "$kT" \
       --rho "$rho" \
       --waits 0 100000 200000 300000 400000 500000 600000 700000 800000 900000 1000000\
