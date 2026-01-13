@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PY=python  # or full path to your env: /home/you/miniconda3/envs/hoomd/bin/python
-OUT=/home/chengling/Research/Project/vitrimer/data/test/vitrimerPaper/NVT
+OUT=/home/chengling/Research/Project/vitrimer/data/test/vitrimerPaper/NVT/V5Langevin
 
 mkdir -p "$OUT"
 
@@ -30,8 +30,8 @@ mkdir -p "$OUT"
 #       --seed 0 &
 #   done
 # done
-declare -a KT_LIST=(10.0 1.0 0.1 0.01 0.001)
-declare -a RHO_LIST=(0.6 0.8 1.2)
+declare -a KT_LIST=(1.0 0.1 0.03)
+declare -a RHO_LIST=(0.92333)
 
 for kT in "${KT_LIST[@]}"; do
   for rho in "${RHO_LIST[@]}"; do
@@ -42,7 +42,7 @@ for kT in "${KT_LIST[@]}"; do
       --kT "$kT" \
       --rho "$rho" \
       --waits 0 100000 200000 300000 400000 500000 600000 700000 800000 900000 1000000\
-      --per_decade 20 \
+      --per_decade 10 \
       --duration_after_wait 1000000 \
       --mttk_tau 1.0 \
       --outdir "$run_dir" \

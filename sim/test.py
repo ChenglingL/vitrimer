@@ -275,16 +275,17 @@ def main():
         # ------------------------ NVT THERMOSTAT ------------------------
     print("box resize with soft start \n")
     soft_T = 0.2
-    mttk = hoomd.md.methods.thermostats.MTTK(
+    soft_T = 0.2
+    langevin = hoomd.md.methods.Langevin(
         kT=soft_T,
-        tau=args.mttk_tau,
+        filter=hoomd.filter.All()
     )
 
-    nvt = hoomd.md.methods.ConstantVolume(
-        filter=hoomd.filter.All(),
-        thermostat=mttk
-    )
-    sim.operations.integrator.methods.append(nvt)
+    
+    
+    
+    sim.operations.integrator.methods.append(langevin)
+    
     sim.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=soft_T)
     
     box_resize = hoomd.update.BoxResize(
@@ -300,7 +301,17 @@ def main():
     #sim.run(100)
     print(f"Now box: {sim.state.box} \n")
     sim.operations.updaters.remove(box_resize)
-    mttk.kT = args.kT
+    mttk = hoomd.md.methods.thermostats.MTTK(
+        kT=args.kT,
+        tau=args.mttk_tau,
+    )
+
+    nvt = hoomd.md.methods.ConstantVolume(
+        filter=hoomd.filter.All(),
+        thermostat=mttk
+    )
+    sim.operations.integrator.methods.remove(langevin)
+    sim.operations.integrator.methods.append(nvt)
     sim.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=args.kT)
    
     sim.operations.integrator.forces.remove(gauss)
