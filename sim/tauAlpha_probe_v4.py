@@ -7,6 +7,7 @@ import hoomd
 import hoomd.md
 import numpy as np
 import time
+def tag(x, n): return f"{x:.{n}f}"
 
 # ------------------------ GEOMETRY ------------------------
 def random_pos(box_len):
@@ -165,63 +166,17 @@ def main():
     ap.add_argument("--outdir", type=str, default="/home/cli428/vitrimer/data/test/vitrimerPaper/NVT")
     args = ap.parse_args()
 
-    n_stars_N1 = 600  # 7 A ends, 1 B end
-    n_stars_N2 = 300  # 1 A end, 7 B ends
-    segments_per_star = 25
-    sigma = 0.9
-    total_stars = n_stars_N1 + n_stars_N2
-    total_segments = total_stars * segments_per_star
 
     os.makedirs(args.outdir, exist_ok=True)
 
     # ------------------------ INIT DEVICE ------------------------
     device = hoomd.device.auto_select()
     sim = hoomd.Simulation(device=device, seed=args.seed)
-    ini_box_length = 300
-    box_vol = total_segments / args.rho
-    box_length = (total_segments / args.rho) ** (1 / 3)
-    all_pos, all_types, all_bonds = [], [], []
-    index_offset = 0
-
-    for _ in range(n_stars_N1):
-        arms = ['A'] * 7 + ['B']
-        np.random.shuffle(arms)
-        pos, types, bonds = create_star(random_pos(ini_box_length), arms,spacing=0.5, start_index=index_offset)
-        all_pos.extend(pos)
-        all_types.extend(types)
-        all_bonds.extend(bonds)
-        index_offset += len(pos)
-
-    for _ in range(n_stars_N2):
-        arms = ['B'] * 7 + ['A']
-        np.random.shuffle(arms)
-        pos, types, bonds = create_star(random_pos(ini_box_length), arms,spacing=0.5, start_index=index_offset)
-        all_pos.extend(pos)
-        all_types.extend(types)
-        all_bonds.extend(bonds)
-        index_offset += len(pos)
-
-    for i in range(len(all_pos)):
-        all_pos[i] = wrap_into_box(all_pos[i],[ini_box_length, ini_box_length, ini_box_length])
-
-    #print("position of [0,0]:", [i for i, pair in enumerate(all_bonds) if pair == [0, 0]])
-
-
-    # ------------------------ SNAPSHOT ------------------------
-    snapshot = hoomd.Snapshot()
-    snapshot.particles.N = len(all_pos)
-    snapshot.particles.position[:] = all_pos
-    snapshot.particles.types = ['C', 'M', 'A', 'B']
-    snapshot.particles.typeid[:] = [snapshot.particles.types.index(t) for t in all_types]
     
-    snapshot.bonds.N = len(all_bonds)
-    snapshot.bonds.types = ['NN']
-    snapshot.bonds.group[:] = all_bonds
-    snapshot.bonds.typeid[:] = [0] * len(all_bonds)
-
-    volume_ramp = hoomd.variant.box.InverseVolumeRamp([ini_box_length, ini_box_length, ini_box_length, 0, 0, 0], box_vol, 0, 10000)
-    snapshot.configuration.box = [ini_box_length, ini_box_length, ini_box_length, 0, 0, 0]
-    sim.create_state_from_snapshot(snapshot)
+    sim.create_state_from_gsd(
+        filename=f'/home/chengling/Research/Project/vitrimer/data/snapshotSeed/snapshotSeed_rho{tag(args.rho,6)}_NVT.gsd',
+        frame=0   # or -1 for last frame
+    )
 
     # ------------------------ BONDED FORCE ------------------------
     bond = hoomd.md.bond.Harmonic()
@@ -257,52 +212,7 @@ def main():
                 rev_cross.params[(t1, t2)] = {"sigma":0,"n": 0, "epsilon": 0, "lambda3": 0}
     rev_cross.params[('A','B')] = {
         "sigma": 0.5, "n": 10, "epsilon": 100, "lambda3": 1}
-    # rev_cross.lambda_ = 1.0  # swap barrier control
-    # rev_cross.epsilon = 100.0
-    #sim.operations.integrator.forces.append(rev_cross)
-    #lj.r_cut[('A', 'B')] = 0  # disable A-B in LJ
-    #sim.operations.integrator.forces.append(lj)
 
-    # # ------------------------ Soft repulsive force to initialize ------------------------
-
-    gauss = hoomd.md.pair.Gaussian(nlist=nl)
-
-    # Example: all particles interact softly at the start
-    for a in ['C', 'M', 'A', 'B']:
-        for b in ['C', 'M', 'A', 'B']:
-            gauss.params[(a,b)] = dict(epsilon=10.0, sigma=0.4)
-            gauss.r_cut[(a,b)] = 3*0.8
-
-    sim.operations.integrator.forces.append(gauss)
-
-
-        # ------------------------ NVT THERMOSTAT ------------------------
-    print("box resize with soft start \n")
-    soft_T = 0.2
-    langevin = hoomd.md.methods.Langevin(
-        kT=soft_T,
-        filter=hoomd.filter.All()
-    )
-
-    
-    
-    
-    sim.operations.integrator.methods.append(langevin)
-    sim.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=soft_T)
-    
-    box_resize = hoomd.update.BoxResize(
-        trigger=hoomd.trigger.Periodic(10),  # Example: triggers every 10 timesteps
-        box=volume_ramp,  # Pass the variant to define the box change over time
-        filter=hoomd.filter.All()
-    )
-
-    # 4. Add to simulation
-    sim.operations.updaters.append(box_resize)
-
-    sim.run(100000) #soft start
-    #sim.run(100)
-    print(f"Now box: {sim.state.box} \n")
-    sim.operations.updaters.remove(box_resize)
     
     mttk_production = hoomd.md.methods.thermostats.MTTK(
         kT=args.kT,
@@ -313,15 +223,13 @@ def main():
         filter=hoomd.filter.All(),
         thermostat=mttk_production
     )
-    sim.operations.integrator.methods.remove(langevin)
+
     sim.operations.integrator.methods.append(nvt_production)
     sim.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=args.kT)
    
-    sim.operations.integrator.forces.remove(gauss)
     sim.operations.integrator.forces.append(lj)
     sim.operations.integrator.forces.append(rev_cross)
 
-    def tag(x, n): return f"{x:.{n}f}"
     def mkname(wait):
         return os.path.join(
                 args.outdir,
@@ -349,6 +257,9 @@ def main():
     sim.operations.writers.append(table)
 
     files = [{"filename": mkname(w), "wait": int(w), "end": args.end} for w in args.waits]
+    for f in files:
+        if os.path.exists(f["filename"]):
+            os.remove(f["filename"])
     base = base_log_steps(args.duration_after_wait, per_decade=args.per_decade, include_end=True)
     start_step = sim.timestep
     t0 = time.perf_counter()
