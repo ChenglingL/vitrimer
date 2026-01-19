@@ -2,15 +2,15 @@
 set -euo pipefail
 export CUDA_VISIBLE_DEVICES=0 ## 0 is fpr the TiTan / 1 is for Quadro
 PY=python  # or full path to your env: /home/you/miniconda3/envs/hoomd/bin/python
-OUT=/home/cli428/vitrimer/data/test/vitrimerPaper/NVT/GPULangevin/
+OUT=/home/cli428/vitrimer/data/test/vitrimerPaper/NVT/V4Test/
 
 mkdir -p "$OUT"
 
-declare -a KT_LIST=(1.0 0.1 0.03)
-declare -a RHO_LIST=(0.92333)
+declare -a KT_LIST=(3.0 1.0 0.3 0.1 0.03 0.01 0.003)
+declare -a RHO_LIST=(0.8 1.0 1.2 1.4 1.6 2.0 2.4)
 
-for kT in "${KT_LIST[@]}"; do
-  for rho in "${RHO_LIST[@]}"; do
+for rho in "${RHO_LIST[@]}"; do
+  for kT in "${KT_LIST[@]}"; do
     run_dir="${OUT}/rho${rho}"
     mkdir -p "$run_dir"
 
