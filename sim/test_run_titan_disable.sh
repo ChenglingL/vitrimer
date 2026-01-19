@@ -6,8 +6,8 @@ OUT=/home/cli428/vitrimer/data/test/vitrimerPaper/NVT/V4RevCrossDisable/
 
 mkdir -p "$OUT"
 
-declare -a KT_LIST=(1.0 0.1 0.03)
-declare -a RHO_LIST=(0.92333)
+declare -a KT_LIST=(1.0 0.3 0.1 0.03)
+declare -a RHO_LIST=(0.8)
 
 for kT in "${KT_LIST[@]}"; do
   for rho in "${RHO_LIST[@]}"; do
