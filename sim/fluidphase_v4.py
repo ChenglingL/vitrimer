@@ -8,6 +8,83 @@ import hoomd.md
 import numpy as np
 import time
 def tag(x, n): return f"{x:.{n}f}"
+def mic_displacement_ortho(r, r0, L):
+        """Minimum-image displacement for orthorhombic boxes.
+        r, r0: (N,3) positions; L: (3,) box lengths"""
+        dr = r - r0
+
+        dr -= L * np.round(dr / L)
+        return dr
+class ActiveLJPairs(hoomd.custom.Action):
+
+    def __init__(self, sim, lj):
+        self.sim = sim
+        self.lj = lj
+
+        self._lj_pairs = 0
+
+
+        # Build bond exclusion set
+        snap = sim.state.get_snapshot()
+        self.bond_pairs = set()
+
+        if snap.communicator.rank == 0 and snap.bonds.N > 0:
+            for i, j in snap.bonds.group:
+                self.bond_pairs.add((min(i, j), max(i, j)))
+    
+    def act(self, timestep):
+        snap = self.sim.state.get_snapshot()
+        if snap.communicator.rank != 0:
+            return
+
+        pos = snap.particles.position
+        types = snap.particles.types
+        typeid = snap.particles.typeid
+        box = snap.configuration.box  # [Lx, Ly, Lz, xy, xz, yz]
+        L = np.array(box[:3], dtype=np.float64)
+
+        N = len(pos)
+        count = 0
+
+        for i in range(N):
+            ti = types[typeid[i]]
+            for j in range(i + 1, N):
+
+                # EXCLUDE bonded pairs
+                if (i, j) in self.bond_pairs:
+                    continue
+
+                tj = types[typeid[j]]
+                rcut = self.lj.r_cut[(ti, tj)]
+                if rcut <= 0:
+                    continue
+
+                rij = mic_displacement_ortho(np.array(pos[j], dtype=np.float64),np.array(pos[i], dtype=np.float64), L)
+                if np.dot(rij, rij) < rcut * rcut:
+                    count += 1
+
+        self._lj_pairs = count
+
+
+
+    @hoomd.logging.log(category="scalar", default=True)
+    def active_lj_pairs(self):
+        return self._count
+
+class PressureTrace(hoomd.custom.Action):
+
+    def __init__(self, thermo, volume):
+        self.thermo = thermo
+        self.volume = volume
+        self._trace = 0.0
+
+    def act(self, timestep):
+        # pressure_tensor is available after integration starts
+        self._trace = (self.thermo.pressure * 3 * self.volume - 2 * self.thermo.kinetic_energy) / self.volume
+
+    @hoomd.logging.log(category="scalar", default=True)
+    def pressure_trace(self):
+        return self._trace
 # ------------------------ GEOMETRY ------------------------
 def random_pos(box_len):
     return np.random.uniform(-box_len / 2, box_len / 2, size=3)
@@ -150,7 +227,7 @@ def main():
     print(hoomd.device.GPU.get_available_devices())
     ap = argparse.ArgumentParser(description="Star vitrimer (HOOMD v5) runner.")
     ap.add_argument("--kT", type=float, required=True, help="Temperature (kT).")
-    ap.add_argument("--rho", type=float, nargs="*", required=True, help="Number density (segments per volume).")
+    ap.add_argument("--rho", type=float, default=10.0, help="Number density (segments per volume).")
     ap.add_argument("--dt", type=float, default=1e-3)
     ap.add_argument("--mttk_tau", type=float, default=1.0)
     ap.add_argument("--end", type=float, default=None)
@@ -163,66 +240,24 @@ def main():
     ap.add_argument("--waits", type=int, nargs="*", default=[0, 100_000, 300_000],
                     help="List of wait steps for separate files.")
     ap.add_argument("--outdir", type=str, default="/home/cli428/vitrimer/data/test/vitrimerPaper/NVT")
+    ap.add_argument("--fluid_dir", type=str, default="/home/cli428/vitrimer/data/test/vitrimerPaper/NVT/V4Test/snapshotSeed")
     args = ap.parse_args()
 
-    n_stars_N1 = 600  # 7 A ends, 1 B end
-    n_stars_N2 = 300  # 1 A end, 7 B ends
-    segments_per_star = 25
-    sigma = 0.9
-    total_stars = n_stars_N1 + n_stars_N2
-    total_segments = total_stars * segments_per_star
 
     os.makedirs(args.outdir, exist_ok=True)
 
     # ------------------------ INIT DEVICE ------------------------
     device = hoomd.device.auto_select()
     sim = hoomd.Simulation(device=device, seed=args.seed)
-    ini_box_length = 300
-    box_vol = [total_segments / rho for rho in args.rho]
-    box_length = [(total_segments / rho) ** (1/3) for rho in args.rho]
-    all_pos, all_types, all_bonds = [], [], []
-    index_offset = 0
-
-    for _ in range(n_stars_N1):
-        arms = ['A'] * 7 + ['B']
-        np.random.shuffle(arms)
-        pos, types, bonds = create_star(random_pos(ini_box_length), arms,spacing=0.5, start_index=index_offset)
-        all_pos.extend(pos)
-        all_types.extend(types)
-        all_bonds.extend(bonds)
-        index_offset += len(pos)
-
-    for _ in range(n_stars_N2):
-        arms = ['B'] * 7 + ['A']
-        np.random.shuffle(arms)
-        pos, types, bonds = create_star(random_pos(ini_box_length), arms,spacing=0.5, start_index=index_offset)
-        all_pos.extend(pos)
-        all_types.extend(types)
-        all_bonds.extend(bonds)
-        index_offset += len(pos)
-
-    for i in range(len(all_pos)):
-        all_pos[i] = wrap_into_box(all_pos[i],[ini_box_length, ini_box_length, ini_box_length])
-
-    #print("position of [0,0]:", [i for i, pair in enumerate(all_bonds) if pair == [0, 0]])
-
-
-    # ------------------------ SNAPSHOT ------------------------
-    snapshot = hoomd.Snapshot()
-    snapshot.particles.N = len(all_pos)
-    snapshot.particles.position[:] = all_pos
-    snapshot.particles.types = ['C', 'M', 'A', 'B']
-    snapshot.particles.typeid[:] = [snapshot.particles.types.index(t) for t in all_types]
-    
-    snapshot.bonds.N = len(all_bonds)
-    snapshot.bonds.types = ['NN']
-    snapshot.bonds.group[:] = all_bonds
-    snapshot.bonds.typeid[:] = [0] * len(all_bonds)
-
-    volume_ramp = hoomd.variant.box.InverseVolumeRamp([ini_box_length, ini_box_length, ini_box_length, 0, 0, 0], box_vol[0] * 1.1, 0, 10000)
-    snapshot.configuration.box = [ini_box_length, ini_box_length, ini_box_length, 0, 0, 0]
-    sim.create_state_from_snapshot(snapshot)
-
+    fluidname = os.path.join(
+            args.fluid_dir,
+            f"snapshotSeed_rho{tag(args.rho,6)}_NVT.gsd"
+        )
+    sim.create_state_from_gsd(
+        filename=fluidname,
+        frame=0   # or -1 for last frame
+    )
+    box_V = 900 * 25 / args.rho
     # ------------------------ BONDED FORCE ------------------------
     bond = hoomd.md.bond.Harmonic()
     bond.params['NN'] = dict(k=1000.0, r0=1.0)
@@ -257,108 +292,35 @@ def main():
                 rev_cross.params[(t1, t2)] = {"sigma":0,"n": 0, "epsilon": 0, "lambda3": 0}
     rev_cross.params[('A','B')] = {
         "sigma": 0.5, "n": 10, "epsilon": 100, "lambda3": 1}
-    # rev_cross.lambda_ = 1.0  # swap barrier control
-    # rev_cross.epsilon = 100.0
-    #sim.operations.integrator.forces.append(rev_cross)
-    #lj.r_cut[('A', 'B')] = 0  # disable A-B in LJ
-    #sim.operations.integrator.forces.append(lj)
 
-    # # ------------------------ Soft repulsive force to initialize ------------------------
-
-    gauss = hoomd.md.pair.Gaussian(nlist=nl)
-
-    # Example: all particles interact softly at the start
-    for a in ['C', 'M', 'A', 'B']:
-        for b in ['C', 'M', 'A', 'B']:
-            gauss.params[(a,b)] = dict(epsilon=10.0, sigma=0.4)
-            gauss.r_cut[(a,b)] = 3*0.8
-
-    sim.operations.integrator.forces.append(gauss)
-
-
-        # ------------------------ NVT THERMOSTAT ------------------------
-    print("box resize with soft start \n")
-    langevin = hoomd.md.methods.Langevin(
-        kT=0.2,
-        filter=hoomd.filter.All()
+    
+    mttk_production = hoomd.md.methods.thermostats.MTTK(
+        kT=args.kT,
+        tau=args.mttk_tau,
     )
 
-    
-    
-    
-    sim.operations.integrator.methods.append(langevin)
+    nvt_production = hoomd.md.methods.ConstantVolume(
+        filter=hoomd.filter.All(),
+        thermostat=mttk_production
+    )
+
+    sim.operations.integrator.methods.append(nvt_production)
     sim.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=args.kT)
-    
-    box_resize = hoomd.update.BoxResize(
-        trigger=hoomd.trigger.Periodic(10),  # Example: triggers every 10 timesteps
-        box=volume_ramp,  # Pass the variant to define the box change over time
-        filter=hoomd.filter.All()
-    )
-
-    # 4. Add to simulation
-    sim.operations.updaters.append(box_resize)
-
-    sim.run(100000) #soft start
-    #sim.run(100)
-    print(f"Now box: {sim.state.box} \n")
-    sim.operations.updaters.remove(box_resize)
-    
-    
    
-    sim.operations.integrator.forces.remove(gauss)
     sim.operations.integrator.forces.append(lj)
     sim.operations.integrator.forces.append(rev_cross)
-    
-    sim.operations.integrator.methods.remove(langevin)
-    
-
-    for i,target_vol in enumerate(box_vol):
-        print(f"Target rho: {args.rho[i]} \n")
-        sim.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=0.2)
-        langevin2 = hoomd.md.methods.Langevin(
-            kT=0.2,
-            filter=hoomd.filter.All()
-        )
-
-        sim.operations.integrator.methods.append(langevin2)
-        volume_ramp = hoomd.variant.box.InverseVolumeRamp(sim.state.box, target_vol, 0, 1000000)
-        
-        box_resize = hoomd.update.BoxResize(
-            trigger=hoomd.trigger.Periodic(10),  # Example: triggers every 10 timesteps
-            box=volume_ramp,  # Pass the variant to define the box change over time
-            filter=hoomd.filter.All()
-        )
-        sim.operations.updaters.append(box_resize)
-        #sim.run(1000000)
-        sim.run(10000000)
-        sim.operations.updaters.remove(box_resize)
-        sim.operations.integrator.methods.remove(langevin2)
-        langevin2 = hoomd.md.methods.Langevin(
-            kT=args.kT,
-            filter=hoomd.filter.All()
-        )
-
-        sim.operations.integrator.methods.append(langevin2)
-        sim.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=args.kT)
-        print(f"Now box: {sim.state.box} \n")
-        print(f"Now rho: {args.rho[i]} \n")
-        fname = os.path.join(
+    sim.run(500000)
+    fname = os.path.join(
             args.outdir,
-            f"fluiphase_T{tag(args.kT,8)}_rho{tag(args.rho[i],6)}_NVT.gsd"
+            f"fluidphase_rho{tag(args.rho,6)}_NVT.gsd"
         )
-        w = hoomd.write.GSD(
-            filename=fname,
-            trigger=hoomd.trigger.Periodic(100000),  # write next step only
-            mode="ab",
-            filter=hoomd.filter.All(),
-        )
-        sim.operations.writers.append(w)
-        sim.run(1000000)
-        sim.operations.writers.remove(w)
-        sim.operations.integrator.methods.remove(langevin2)
-    
-
-
-    
+    w = hoomd.write.GSD(
+        filename=fname,
+        trigger=hoomd.trigger.Periodic(500000),  # write next step only
+        mode="ab",
+        filter=hoomd.filter.All(),
+    )
+    sim.operations.writers.append(w)
+    sim.run(50000001)
 if __name__ == "__main__":
     main()
