@@ -242,8 +242,9 @@ def main():
     ap.add_argument("--outdir", type=str, default="/home/cli428/vitrimer/data/test/vitrimerPaper/NVT")
     ap.add_argument("--fluid_dir", type=str, default="/home/cli428/vitrimer/data/test/vitrimerPaper/NVT/V4Test/snapshotSeed")
     args = ap.parse_args()
-
-
+    tau_est = 1
+    if args.rho > 2.0:
+          tau_est = 5
     os.makedirs(args.outdir, exist_ok=True)
 
     # ------------------------ INIT DEVICE ------------------------
@@ -309,14 +310,14 @@ def main():
    
     sim.operations.integrator.forces.append(lj)
     sim.operations.integrator.forces.append(rev_cross)
-    sim.run(500000)
+    sim.run(tau_est * 100000)
     fname = os.path.join(
             args.outdir,
             f"fluidphase_rho{tag(args.rho,6)}_NVT.gsd"
         )
     w = hoomd.write.GSD(
         filename=fname,
-        trigger=hoomd.trigger.Periodic(500000),  # write next step only
+        trigger=hoomd.trigger.Periodic(tau_est * 100000),  # write next step only
         mode="ab",
         filter=hoomd.filter.All(),
     )
