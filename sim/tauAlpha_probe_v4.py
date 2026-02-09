@@ -8,7 +8,83 @@ import hoomd.md
 import numpy as np
 import time
 def tag(x, n): return f"{x:.{n}f}"
+def mic_displacement_ortho(r, r0, L):
+        """Minimum-image displacement for orthorhombic boxes.
+        r, r0: (N,3) positions; L: (3,) box lengths"""
+        dr = r - r0
 
+        dr -= L * np.round(dr / L)
+        return dr
+class ActiveLJPairs(hoomd.custom.Action):
+
+    def __init__(self, sim, lj):
+        self.sim = sim
+        self.lj = lj
+
+        self._lj_pairs = 0
+
+
+        # Build bond exclusion set
+        snap = sim.state.get_snapshot()
+        self.bond_pairs = set()
+
+        if snap.communicator.rank == 0 and snap.bonds.N > 0:
+            for i, j in snap.bonds.group:
+                self.bond_pairs.add((min(i, j), max(i, j)))
+    
+    def act(self, timestep):
+        snap = self.sim.state.get_snapshot()
+        if snap.communicator.rank != 0:
+            return
+
+        pos = snap.particles.position
+        types = snap.particles.types
+        typeid = snap.particles.typeid
+        box = snap.configuration.box  # [Lx, Ly, Lz, xy, xz, yz]
+        L = np.array(box[:3], dtype=np.float64)
+
+        N = len(pos)
+        count = 0
+
+        for i in range(N):
+            ti = types[typeid[i]]
+            for j in range(i + 1, N):
+
+                # EXCLUDE bonded pairs
+                if (i, j) in self.bond_pairs:
+                    continue
+
+                tj = types[typeid[j]]
+                rcut = self.lj.r_cut[(ti, tj)]
+                if rcut <= 0:
+                    continue
+
+                rij = mic_displacement_ortho(np.array(pos[j], dtype=np.float64),np.array(pos[i], dtype=np.float64), L)
+                if np.dot(rij, rij) < rcut * rcut:
+                    count += 1
+
+        self._lj_pairs = count
+
+
+
+    @hoomd.logging.log(category="scalar", default=True)
+    def active_lj_pairs(self):
+        return self._count
+
+class PressureTrace(hoomd.custom.Action):
+
+    def __init__(self, thermo, volume):
+        self.thermo = thermo
+        self.volume = volume
+        self._trace = 0.0
+
+    def act(self, timestep):
+        # pressure_tensor is available after integration starts
+        self._trace = (self.thermo.pressure * 3 * self.volume - 2 * self.thermo.kinetic_energy) / self.volume
+
+    @hoomd.logging.log(category="scalar", default=True)
+    def pressure_trace(self):
+        return self._trace
 # ------------------------ GEOMETRY ------------------------
 def random_pos(box_len):
     return np.random.uniform(-box_len / 2, box_len / 2, size=3)
@@ -164,6 +240,7 @@ def main():
     ap.add_argument("--waits", type=int, nargs="*", default=[0, 100_000, 300_000],
                     help="List of wait steps for separate files.")
     ap.add_argument("--outdir", type=str, default="/home/cli428/vitrimer/data/test/vitrimerPaper/NVT")
+    ap.add_argument("--fluid_dir", type=str, default="/home/cli428/vitrimer/data/test/vitrimerPaper/NVT/V4Test/snapshotSeed")
     args = ap.parse_args()
 
 
@@ -172,12 +249,15 @@ def main():
     # ------------------------ INIT DEVICE ------------------------
     device = hoomd.device.auto_select()
     sim = hoomd.Simulation(device=device, seed=args.seed)
-    
+    fluidname = os.path.join(
+            args.fluid_dir,
+            f"snapshotSeed_rho{tag(args.rho,6)}_NVT.gsd"
+        )
     sim.create_state_from_gsd(
-        filename=f'/home/chengling/Research/Project/vitrimer/data/snapshotSeed/snapshotSeed_rho{tag(args.rho,6)}_NVT.gsd',
+        filename=fluidname,
         frame=0   # or -1 for last frame
     )
-
+    box_V = 900 * 25 / args.rho
     # ------------------------ BONDED FORCE ------------------------
     bond = hoomd.md.bond.Harmonic()
     bond.params['NN'] = dict(k=1000.0, r0=1.0)
@@ -233,7 +313,7 @@ def main():
     def mkname(wait):
         return os.path.join(
                 args.outdir,
-                f"traj_T{tag(args.kT,8)}_rho{tag(args.rho,6)}_dt{tag(args.dt,3)}_wait{wait}.gsd"
+                f"traj_behemoth_T{tag(args.kT,8)}_rho{tag(args.rho,6)}_dt{tag(args.dt,3)}_wait{wait}.gsd"
         )
     logger = hoomd.logging.Logger(categories=['scalar'])
     thermo = hoomd.md.compute.ThermodynamicQuantities(filter=hoomd.filter.All())
@@ -241,8 +321,29 @@ def main():
     logger.add(thermo, quantities=[
         "potential_energy",
         "kinetic_energy",
-        "kinetic_temperature"
+        "kinetic_temperature",
+        "pressure"
     ])
+    p_trace = PressureTrace(thermo,box_V)
+
+    sim.operations.writers.append(
+    hoomd.write.CustomWriter(
+        action=p_trace,
+        trigger=hoomd.trigger.Periodic(100)
+        )
+    )
+    logger.add(p_trace,user_name ="pressure_trace")
+    
+    # lj_counter = ActiveLJPairs(sim, lj)
+
+    # sim.operations.writers.append(
+    # hoomd.write.CustomWriter(
+    #     action=lj_counter,
+    #     trigger=hoomd.trigger.Periodic(100)
+    #     )
+    # )
+    # logger.add(lj_counter,user_name ="num_active_lj_pairs")
+
     
     f_table = open(os.path.join(
         args.outdir,
